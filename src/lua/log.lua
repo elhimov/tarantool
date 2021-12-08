@@ -1,8 +1,9 @@
 -- log.lua
 --
+local debug = require('debug')
 local ffi = require('ffi')
 ffi.cdef[[
-    typedef void (*sayfunc_t)(int level, const char *filename, int line,
+    typedef void (*sayfunc_t)(int level, const char *module_name, const char *filename, int line,
                const char *error, const char *format, ...);
 
     enum say_logger_type {
@@ -127,10 +128,11 @@ end
 -- Default options. The keys are part of
 -- user API , so change with caution.
 local log_cfg = {
-    log             = nil,
-    nonblock        = nil,
-    level           = S_INFO,
-    format          = fmt_num2str[ffi.C.SF_PLAIN],
+    log               = nil,
+    nonblock          = nil,
+    print_module_name = false,
+    level             = S_INFO,
+    format            = fmt_num2str[ffi.C.SF_PLAIN],
 }
 
 -- Name mapping from box to log module and
@@ -260,11 +262,21 @@ local function verify_level(key, level)
     return true
 end
 
+-- Test if module_name is a valid string.
+local function verify_module_name(module_name)
+    if type(module_name) ~= 'string' then
+        return false, "must be a string"
+    end
+
+    return true
+end
+
 local verify_ops = {
-    ['log']         = verify_static,
-    ['nonblock']    = verify_static,
-    ['format']      = verify_format,
-    ['level']       = verify_level,
+    ['log']                 = verify_static,
+    ['nonblock']            = verify_static,
+    ['print_module_name']   = verify_static,
+    ['format']              = verify_format,
+    ['level']               = verify_level,
 }
 
 -- Verify a value for the particular key.
@@ -279,7 +291,7 @@ local function verify_option(k, v, ...)
 end
 
 -- Main routine which pass data to C logging code.
-local function say(level, fmt, ...)
+local function say(self, level, fmt, ...)
     if ffi.C.log_level < level then
         -- don't waste cycles on debug.getinfo()
         return
@@ -306,7 +318,6 @@ local function say(level, fmt, ...)
         fmt = tostring(fmt)
     end
 
-    local debug = require('debug')
     local frame = debug.getinfo(3, "Sl")
     local line, file = 0, 'eval'
     if type(frame) == 'table' then
@@ -314,13 +325,21 @@ local function say(level, fmt, ...)
         file = frame.short_src or frame.src or 'eval'
     end
 
-    ffi.C._say(level, file, line, nil, format, fmt)
+    local module_name = box.NULL
+    if (log_cfg.print_module_name) then
+        if (self ~= nil) then
+            module_name = self.module_name
+        else
+            module_name = "log"
+        end
+    end
+    ffi.C._say(level, module_name, file, line, nil, format, fmt)
 end
 
 -- Just a syntactic sugar over say routine.
-local function say_closure(lvl)
+local function say_closure(lvl, self)
     return function (fmt, ...)
-        say(lvl, fmt, ...)
+        say(self, lvl, fmt, ...)
     end
 end
 
@@ -343,7 +362,7 @@ local function set_log_level(level, update_box_cfg)
     end
 
     local m = "log: level set to %s"
-    say(S_DEBUG, m:format(level))
+    say_closure(S_DEBUG, nil)(m:format(level))
 end
 
 -- Tries to set a new level, or print an error.
@@ -377,7 +396,7 @@ local function set_log_format(name, update_box_cfg)
     end
 
     local m = "log: format set to '%s'"
-    say(S_DEBUG, m:format(name))
+    say_closure(S_DEBUG, nil)(m:format(name))
 end
 
 -- Tries to set a new format, or print an error.
@@ -557,8 +576,8 @@ local function load_cfg(self, cfg)
     -- and box.cfg output as well.
     box_cfg_update()
 
-    local m = "log.cfg({log=%s,level=%s,nonblock=%s,format=\'%s\'})"
-    say(S_DEBUG, m:format(cfg.log, cfg.level, cfg.nonblock, cfg.format))
+    local m = "log.cfg({log=%s,level=%s,nonblock=%s,print_module_name=%s,format=\'%s\'})"
+    say_closure(S_DEBUG, nil)(m:format(cfg.log, cfg.level, cfg.nonblock, cfg.print_module_name, cfg.format))
 end
 
 local compat_warning_said = false
@@ -566,21 +585,17 @@ local compat_v16 = {
     logger_pid = function()
         if not compat_warning_said then
             compat_warning_said = true
-            say(S_WARN, 'logger_pid() is deprecated, please use pid() instead')
+            say_closure(S_WARN, nil)('logger_pid() is deprecated, please use pid() instead')
         end
         return log_pid()
     end;
 }
 
 local log = {
-    warn = say_closure(S_WARN),
-    info = say_closure(S_INFO),
-    verbose = say_closure(S_VERBOSE),
-    debug = say_closure(S_DEBUG),
-    error = say_closure(S_ERROR),
     rotate = log_rotate,
     pid = log_pid,
     level = log_level,
+    module_name = "tarantool",
     log_format = log_format,
     cfg = setmetatable(log_cfg, {
         __call = load_cfg,
@@ -593,13 +608,47 @@ local log = {
     },
 }
 
+-- Set new logging module name, the module name must be valid!
+local function set_module_name(self, module_name)
+    self.module_name = module_name
+end
+
+-- Tries to set a new module name, or print an error.
+local function log_module_name(self, module_name)
+    local ok, msg = verify_module_name(module_name)
+    if not ok then
+        error(msg)
+    end
+
+    set_module_name(self, module_name)
+end
+
+
+function log:new(module_name)
+    log_module_name(self, module_name)
+end
+
 setmetatable(log, {
     __serialize = function(self)
         local res = table.copy(self)
         res.box_api = nil
         return setmetatable(res, {})
     end,
-    __index = compat_v16;
+    __index = function(self, key)
+        if key == 'info' then
+            return say_closure(S_INFO, self)
+        elseif key == 'warn' then
+            return say_closure(S_WARN, self)
+        elseif key == 'verbose' then
+            return say_closure(S_VERBOSE, self)
+        elseif key == 'debug' then
+            return say_closure(S_DEBUG, self)
+        elseif key == 'error' then
+            return say_closure(S_ERROR, self)
+        elseif key == 'logger_pid' then
+            return compat_v16.logger_pid
+        end
+    end
 })
 
 return log

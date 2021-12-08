@@ -137,7 +137,8 @@ enum syslog_facility {
 struct log;
 
 typedef int (*log_format_func_t)(struct log *log, char *buf, int len, int level,
-				 const char *filename, int line, const char *error,
+                 const char* module_name, const char *filename,
+                 int line, const char *error,
 				 const char *format, va_list ap);
 
 /**
@@ -148,6 +149,9 @@ struct log {
 	int fd;
 	/** The current log level. */
 	int level;
+	/** The current module name. */
+	const char* module_name;
+
 	enum say_logger_type type;
 	/* Type of syslog destination. */
 	enum say_syslog_server_type syslog_server_type;
@@ -193,19 +197,19 @@ log_destroy(struct log *log);
 
 /** A utility function to handle va_list from different varargs functions. */
 int
-log_vsay(struct log *log, int level, const char *filename, int line,
-	 const char *error, const char *format, va_list ap);
+log_vsay(struct log *log, int level, const char* module_name, const char *filename,
+        int line, const char *error, const char *format, va_list ap);
 
 /** Perform log write. */
 static inline int
-log_say(struct log *log, int level, const char *filename,
-	int line, const char *error, const char *format, ...)
+log_say(struct log *log, int level, const char* module_name, const char *filename,
+        int line, const char *error, const char *format, ...)
 {
-	va_list ap;
-	va_start(ap, format);
-	int total = log_vsay(log, level, filename, line, error, format, ap);
-	va_end(ap);
-	return total;
+    va_list ap;
+    va_start(ap, format);
+    int total = log_vsay(log, level, module_name, filename, line, error, format, ap);
+    va_end(ap);
+    return total;
 }
 
 /**
@@ -295,11 +299,11 @@ void
 say_logger_free(void);
 
 /** \cond public */
-typedef void (*sayfunc_t)(int, const char *, int, const char *,
+typedef void (*sayfunc_t)(int, const char *, const char *, int, const char *,
 		    const char *, ...);
 
 /** Internal function used to implement say() macros */
-CFORMAT(printf, 5, 6) extern sayfunc_t _say;
+CFORMAT(printf, 6, 7) extern sayfunc_t _say;
 
 /**
  * Format and print a message to Tarantool log file.
@@ -315,7 +319,7 @@ CFORMAT(printf, 5, 6) extern sayfunc_t _say;
  */
 #define say_file_line(level, file, line, error, format, ...) ({ \
 	if (say_log_level_is_enabled(level)) \
-		_say(level, file, line, error, format, ##__VA_ARGS__); })
+		_say(level, NULL, file, line, error, format, ##__VA_ARGS__); })
 
 /**
  * Format and print a message to Tarantool log file.
@@ -397,27 +401,28 @@ enum {
 })
 
 #define say_crit_ratelimited(format, ...) \
-        say_ratelimited(S_CRIT, NULL, format, ##__VA_ARGS__)
+    say_ratelimited(S_CRIT, NULL, format, ##__VA_ARGS__)
 
 #define say_warn_ratelimited(format, ...) \
-	say_ratelimited(S_WARN, NULL, format, ##__VA_ARGS__)
+    say_ratelimited(S_WARN, NULL, format, ##__VA_ARGS__)
 
 #define say_info_ratelimited(format, ...) \
-        say_ratelimited(S_INFO, NULL, format, ##__VA_ARGS__)
+    say_ratelimited(S_INFO, NULL, format, ##__VA_ARGS__)
 
 /**
  * Format and print a message to Tarantool log file.
  *
  * \param log (struct log *) - logger object
  * \param level (int) - log level (see enum \link say_level \endlink)
+ * \param module_name (const char * ) - name of module that we are logging
  * \param format (const char * ) - printf()-like format string
  * \param ... - format arguments
  * \sa printf()
  * \sa enum say_level
  */
-#define log_say_level(log, _level, format, ...) ({ 	\
+#define log_say_level(log, _level, module_name, format, ...) ({ 	\
 	if (_level <= log->level) 			\
-		log_say(log, _level, __FILE__, __LINE__,\
+	    log_say(log, _level, module_name, __FILE__, __LINE__,\
 		format, ##__VA_ARGS__); })
 
 
@@ -425,6 +430,7 @@ enum {
  * Format and print a message to specified logger.
  *
  * \param log (struct log *) - logger object
+ * \param module_name (const char * ) - name of module that we are logging
  * \param format (const char * ) - printf()-like format string
  * \param ... - format arguments
  * \sa printf()
@@ -434,32 +440,32 @@ enum {
  * log_say_info("Some useful information: %s", status);
  * \endcode
  */
-#define log_say_error(log, format, ...) \
-	log_say_level(log, S_ERROR, NULL, format, ##__VA_ARGS__)
+#define log_say_error(log, module_name, format, ...) \
+    log_say_level(log, S_ERROR, module_name, NULL, format, ##__VA_ARGS__)
 
 /** \copydoc log_say_error() */
 #define log_say_crit(log, format, ...) \
-	log_say_level(log, S_CRIT, NULL, format, ##__VA_ARGS__)
+    log_say_level(log, S_CRIT, module_name, NULL, format, ##__VA_ARGS__)
 
 /** \copydoc log_say_error() */
 #define log_say_warn(log, format, ...) \
-	log_say_level(log, S_WARN, NULL, format, ##__VA_ARGS__)
+    log_say_level(log, S_WARN, module_name, NULL, format, ##__VA_ARGS__)
 
 /** \copydoc log_say_error() */
 #define log_say_info(log, format, ...) \
-	log_say_level(log, S_INFO, NULL, format, ##__VA_ARGS__)
+    log_say_level(log, S_INFO, module_name, NULL, format, ##__VA_ARGS__)
 
 /** \copydoc log_say_error() */
 #define log_say_verbose(log, format, ...) \
-	log_say_level(log, S_VERBOSE, NULL, format, ##__VA_ARGS__)
+    log_say_level(log, S_VERBOSE, module_name, NULL, format, ##__VA_ARGS__)
 
 /** \copydoc log_say_error() */
 #define log_say_debug(log, format, ...) \
-	log_say_level(log, S_DEBUG, NULL, format, ##__VA_ARGS__)
+    log_say_level(log, S_DEBUG, module_name, NULL, format, ##__VA_ARGS__)
 
 /** \copydoc log_say_error(). */
 #define log_say_syserror(log, format, ...) \
-	log_say_level(log, S_SYSERROR, strerror(errno), format, ##__VA_ARGS__)
+    log_say_level(log, S_SYSERROR, module_name, strerror(errno), format, ##__VA_ARGS__)
 
 /* internals, for unit testing */
 
@@ -500,6 +506,7 @@ say_free_syslog_opts(struct say_syslog_opts *opts);
  * @param buf buffer where the formatted message should be written to
  * @param len size of buffer
  * @param level log level of message
+ * @param module_name name of module that we are logging
  * @param filename name of file where log was called
  * @param line name of file where log was called
  * @param error error in case of system errors
@@ -509,12 +516,12 @@ say_free_syslog_opts(struct say_syslog_opts *opts);
  */
 int
 say_format_json(struct log *log, char *buf, int len, int level,
-		const char *filename, int line, const char *error,
-		const char *format, va_list ap);
+        const char* module_name, const char *filename,
+        int line, const char *error, const char *format, va_list ap);
 int
 say_format_plain(struct log *log, char *buf, int len, int level,
-		 const char *filename, int line, const char *error,
-		 const char *format, va_list ap);
+        const char* module_name, const char *filename,
+        int line, const char *error, const char *format, va_list ap);
 
 #if defined(__cplusplus)
 } /* extern "C" */
