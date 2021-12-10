@@ -123,10 +123,11 @@ local default_cfg = {
 -- cfg variables which are covered by modules
 local module_cfg = {
     -- logging
-    log                 = log.box_api,
-    log_nonblock        = log.box_api,
-    log_level           = log.box_api,
-    log_format          = log.box_api,
+    log                   = log.box_api,
+    log_nonblock          = log.box_api,
+    log_print_module_name = log.box_api,
+    log_level             = log.box_api,
+    log_format            = log.box_api,
 }
 
 -- cfg types for modules, probably better to
@@ -139,10 +140,11 @@ local module_cfg = {
 -- type or a combination of types here.
 local module_cfg_type = {
     -- logging
-    log                 = 'string',
-    log_nonblock        = 'boolean',
-    log_level           = 'number, string',
-    log_format          = 'string',
+    log                   = 'string',
+    log_nonblock          = 'boolean',
+    log_print_module_name = 'boolean',
+    log_level             = 'number, string',
+    log_format            = 'string',
 }
 
 -- types of available options
@@ -178,10 +180,11 @@ local template_cfg = {
     vinyl_page_size           = 'number',
     vinyl_bloom_fpr           = 'number',
 
-    log                 = 'module',
-    log_nonblock        = 'module',
-    log_level           = 'module',
-    log_format          = 'module',
+    log                   = 'module',
+    log_nonblock          = 'module',
+    log_print_module_name = 'module',
+    log_level             = 'module',
+    log_format            = 'module',
 
     audit_log           = 'string',
     audit_nonblock      = 'boolean',

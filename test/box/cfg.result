@@ -57,6 +57,8 @@ cfg_filter(box.cfg)
  |     - plain
  |   - - log_level
  |     - 5
+ |   - - log_print_module_name
+ |     - false
  |   - - memtx_allocator
  |     - <hidden>
  |   - - memtx_dir
@@ -196,6 +198,8 @@ cfg_filter(box.cfg)
  |     - plain
  |   - - log_level
  |     - 5
+ |   - - log_print_module_name
+ |     - false
  |   - - memtx_allocator
  |     - <hidden>
  |   - - memtx_dir
