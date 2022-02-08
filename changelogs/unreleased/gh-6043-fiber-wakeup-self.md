@@ -1,12 +1,14 @@
 ## bugfix/core
 
 * **[Breaking change]** `fiber.wakeup()` in Lua and `fiber_wakeup()` in C became
-  NOP on the currently running fiber. Previously they allowed to "ignore" the
-  next yield or sleep leading to unexpected spurious wakeups. Could lead to a
+  NOP on the currently running fiber. 
+  
+  Previously they allowed to "ignore" the
+  next yield or sleep, leading to unexpected spurious wakeups. Could lead to a
   crash (in debug build) or undefined behaviour (in release build) if called
   right before `fiber.create()` in Lua or `fiber_start()` in C (gh-6043).
 
-  There was a single usecase for that - reschedule in the same event loop
+  There was a single usecase for that — reschedule in the same event loop
   iteration which is not the same as `fiber.sleep(0)` in Lua and
   `fiber_sleep(0)` in C. Could be done in C like that:
   ```C
@@ -27,7 +29,3 @@
   fiber.new(function() self:wakeup() end)
   fiber.sleep(0)
   ```
-
-----
-Breaking change: `fiber.wakeup()` in Lua and `fiber_wakeup()` in C became NOP on
-the currently running fiber.

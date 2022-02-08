@@ -1,6 +1,7 @@
 ## bugfix/core
+
  * Fixed wrong type specification when printing fiber state
-   change which lead to negative fiber's ID logging (gh-5846).
+   change which led to negative fiber's ID logging (gh-5846).
 
    For example
    ```
