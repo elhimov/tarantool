@@ -1,6 +1,6 @@
 ## feature/lua/datetime
 
- * Add a new builtin module `datetime.lua` that allows to operate
+ * Added a new builtin module `datetime.lua` that allows to operate
    timestamps and intervals values (gh-5941).
  * Parse method to allow converting string literals in extended iso-8601
    or rfc3339 formats (gh-6731);
