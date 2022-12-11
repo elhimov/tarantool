@@ -4,6 +4,10 @@
 import gdb.printing
 import struct
 
+def log(msg):
+    gdb.write(msg)
+    pass
+
 # couple of functions below don't raise an exception and should be used
 # when type/value may or may not exist
 
@@ -19,12 +23,22 @@ def find_value(sym):
     except Exception as exc:
         return None
 
+def is_equal_types(type1, type2):
+    #return 'tag={} code={}'.format(type.tag, type.code)
+    return type1.code == type2.code and type1.tag == type2.tag
+
 def dump_type(type):
-    return 'tag={} code={}'.format(type.tag, type.code)
+    #return 'tag={} code={}'.format(type.tag, type.code)
+    return 'tag={} code={} objfile={} name={}'.format(type.tag, type.code, type.objfile, type.name)
 
 def container_of(ptr, container_type, field):
     return (ptr.cast(gdb.lookup_type('char').pointer()) - container_type[field].bitpos // 8).cast(container_type.pointer()).dereference()
 
+def type_has_field(type, field_name):
+    for field in type.fields():
+        if field.name == field_name:
+            return True
+    return False
 
 INT32_MAX = 2**31 - 1
 INT32_MIN = -2**31
@@ -1207,8 +1221,68 @@ Usage: tt-mp EXP [DEPTH [MAXLENGTH]]
         gdb.write(s + '\n')
 
 
-class JsonTokenPrinter:
-    '''Print a json_token object.'''
+class MurMurHash32:
+    C1 = 0xcc9e2d51
+    C2 = 0x1b873593
+
+    def rotl32(x, r):
+        return ((x << r) | (x >> (32 - r))) & (2^32 - 1)
+
+    @classmethod
+    def do_block(cls, h1, k1): # DOBLOCK
+        k1 *= cls.C1
+        k1 = cls.rotl32(k1, 15)
+        k1 *= cls.C2
+        h1 ^= k1
+        h1 = cls.rotl32(h1, 13)
+        h1 = h1 * 5 + 0xe6546b64
+        return h1, k1
+
+    @classmethod
+    def do_bytes(cls, cnt, h1, c, n, data): # DOBYTES
+        for _ in range(0, cnt):
+            c = c >> 8 | data.read_u8(False) << 24
+            n += 1
+            if n == 4:
+                h1, c = cls.do_block(h1, c)
+                n = 0
+        return h1, c
+
+    @classmethod
+    def process(cls, h1, c, data, len): # PMurHash32_Process
+        n = c & 3
+
+        i = (4-n) & 3
+        if i > 0 and i <= len:
+            h1, c = cls.do_bytes(i, h1, c, n, data)
+            len -= i
+
+        for _ in range(0, len // 4):
+            k1 = data.read_u32(False)
+            h1, _ = cls.do_block(h1, k1)
+
+        len -= len // 4 * 4
+        h1, c = cls.do_bytes(len, h1, c, n, data)
+
+        return h1, (c & ~0xff) | n
+
+    @classmethod
+    def result(cls, h, carry, total_length): # PMurHash32_Result
+        n = carry & 3
+        if n:
+            k1 = carry >> (4-n)*8
+            k1 *= cls.C1; k1 = cls.rotl32(k1,15); k1 *= cls.C2; h ^= k1
+        h ^= total_length
+
+        h ^= h >> 16
+        h *= 0x85ebca6b
+        h ^= h >> 13
+        h *= 0xc2b2ae35
+        h ^= h >> 16
+        return h
+
+class JsonToken:
+    '''Replica of struct json_token.'''
 
     JSON_TOKEN_NUM = gdb.parse_and_eval('JSON_TOKEN_NUM')
     JSON_TOKEN_STR = gdb.parse_and_eval('JSON_TOKEN_STR')
@@ -1220,8 +1294,33 @@ class JsonTokenPrinter:
     def __init__(self, val):
         self.val = val
 
+    @property
+    def type(self):
+        return self.val['type']
+
+    def is_multikey(self): # json_token_is_multikey
+        return self.val['max_child_idx'] == 0 and \
+               self.val['children'][0]['type'] == self.JSON_TOKEN_ANY
+
+    def hash(self): # json_token_hash
+        h = self.val['parent']['hash']
+        carry = 0
+        if self.type == self.JSON_TOKEN_STR:
+            data = self.val['str']
+            data_size = int(self.val['len'])
+        elif self.type == self.JSON_TOKEN_NUM:
+            data = self.val['num'].address
+            data_size = self.val['num'].type.sizeof
+        elif self.type == self.JSON_TOKEN_ANY:
+            data = gdb.Value('*')
+            data_size = 1
+        else:
+            raise gdb.GdbError('JsonToken.hash: unreachable code (token.type={})'.format(self.type))
+        h, carry = MurMurHash32.process(h, carry, InputStream(data), data_size)
+        return MurMurHash32.result(h, carry, data_size)
+
     def to_string(self):
-        type = self.val['type']
+        type = self.type
         hash = self.val['hash']
 
         if type == self.JSON_TOKEN_NUM:
@@ -1257,13 +1356,322 @@ class JsonTokenPrinter:
     def display_hint(self):
         return 'array'
 
+def json_token_cmp(l, r): # json_token_cmp
+    if l.type != r.type:
+        return l.type - r.type
+    if l.type == JsonToken.JSON_TOKEN_NUM:
+        return l['num'] - r['num']
+    elif l.type == JsonToken.JSON_TOKEN_STR:
+        if l['len'] != r['len']:
+            return l['len'] - r['len']
+        #return memcmp(l['str'], r['str'], l['len']);
+        return int(gdb.parse_and_eval('memcmp({}, {}, {})'.format(
+            int(l['str']),
+            int(r['str']),
+            int(l['len']),
+            )))
+    else:
+        return 0
+
+def json_token_cmp_in_tree(a, b): # json_token_cmp_in_tree
+    if a['parent'] != b['parent']:
+        return a['parent'] - b['parent']
+    return json_token_cmp(a, b)
+
+
+class MHash:
+    def __init__(self, val, hash_key, cmp_key):
+        self.val = val
+        self.hash_key = hash_key
+        self.cmp_key = cmp_key
+
+    @property
+    def n_buckets(self):
+        return self.val['n_buckets']
+
+    def exist(self, i): # mh_exist
+        return self.val['b'][i >> 4] & (1 << (i % 16))
+
+    def dirty(self, i): # mh_dirty
+        return self.val['b'][i >> 4] & (1 << (i % 16 + 16))
+
+    @staticmethod
+    def gethk(hash): # mh_gethk
+        return 1
+
+    def mayeq(self, i, hk): # mh_mayeq
+        return self.exist(i)
+
+    def end(self): # mh_end
+        return self.n_buckets
+
+    @staticmethod
+    def next_slot(slot, inc, size): # _mh(next_slot)
+        slot += inc
+        return slot - size if slot >= size else slot
+
+    def find(self, key, arg): # _mh(find)
+        k = self.hash_key(key, arg)
+        hk = self.gethk(k)
+        i = k % self.n_buckets
+        inc = 1 + k % (self.n_buckets - 1)
+        while True:
+            if self.mayeq(i, hk) and \
+                not self.cmp_key(key, self.node(i), arg):
+                return i
+            if not self.dirty(i):
+                return self.n_buckets
+            i = self.next_slot(i, inc, self.n_buckets)
+
+    def node(self, x): # _mh(node)
+        return self.val['p'] + x
+
+class JsonTree:
+    '''Encapsulate struct json_tree and the related functions.'''
+
+    mh_hash_key = lambda a, arg: a['hash'] # mh_hash_key
+    mh_cmp_key = lambda a, b, arg: json_token_cmp_in_tree(a, b.dereference()) # mh_cmp_key
+
+    def __init__(self, val):
+        self.val = val
+
+    def lookup_slowpath(self, parent, token): # json_tree_lookup_slowpath
+        assert token['type'] == JsonToken.JSON_TOKEN_STR
+        key = {}
+        key['type'] = token['type']
+        key['str'] = token['str']
+        key['len'] = token['len']
+        key['parent'] = parent
+        key['hash'] = key.hash()
+        h = MHash(self.val['hash'], self.mh_hash_key, self.mh_cmp_key)
+        id = h.find(key, None)
+        if id == h.end():
+            return None
+        entry = h.node(id);
+        assert int(entry) != 0 and int(entry.dereference()) != 0
+        return entry.dereference()
+
+    def lookup(self, parent, token): # json_tree_lookup
+        ret = None
+        if parent.is_multikey():
+            return parent['children'][0]
+        if token.type == JsonToken.JSON_TOKEN_NUM:
+            if token.num <= parent.max_child_idx:
+                ret = parent.children[token.num];
+        elif token.type == JsonToken.JSON_TOKEN_ANY:
+            pass
+        elif token.type == JsonToken.JSON_TOKEN_STR:
+            ret = self.lookup_slowpath(parent, token)
+        else:
+            raise gdb.GdbError('JsonTree.lookup: unreachable code (token.type={})'.format(token.type))
+        return ret
+
+    @classmethod
+    def entry(cls, token, type, member): # json_tree_entry
+        return container_of(token, type, member)
+
+    @classmethod
+    def entry_safe(cls, token, type, member): # json_tree_entry_safe
+        return cls.entry(token, type, member) if token is not None else None
+
+    def lookup_entry(self, parent, token, type, member): # json_tree_lookup_entry
+        token = self.lookup(parent, token)
+        return self.entry_safe(token, type, member)
+
+class TupleField:
+    gdb_type = gdb.lookup_type('tuple_field')
+
+    def __init__(self, val):
+        self.val = val
+
+    def __str__(self):
+        return 'field_id={} field_type={} offset_slot={} is_key_part={}/{}'.format(
+            str(self.val['id']),
+            str(self.val['type']),
+            str(self.val['offset_slot']),
+            str(self.val['is_key_part']),
+            str(self.val['is_multikey_part']),
+        )
+
+class JsonTokenPrinter:
+    '''Print a json_token object.'''
+
+    JSON_TOKEN_NUM = gdb.parse_and_eval('JSON_TOKEN_NUM')
+    JSON_TOKEN_STR = gdb.parse_and_eval('JSON_TOKEN_STR')
+    JSON_TOKEN_ANY = gdb.parse_and_eval('JSON_TOKEN_ANY')
+    JSON_TOKEN_END = gdb.parse_and_eval('JSON_TOKEN_END')
+
+    tuple_field_type = gdb.lookup_type('tuple_field')
+
+    def __init__(self, val):
+        self.val = val
+
+    def is_multikey(self): # json_token_is_multikey
+        return self.val['max_child_idx'] == 0 and \
+               self.val['children'][0]['type'] == self.JSON_TOKEN_ANY
+
+    def to_string(self):
+        type = self.val['type']
+        hash = self.val['hash']
+
+        if type == self.JSON_TOKEN_NUM:
+            s_id = ' id=' + str(self.val['num'])
+        elif type == self.JSON_TOKEN_STR:
+            s_id = ' id=' + self.val['str'].string('utf-8', 'strict', int(self.val['len']))
+        else:
+            s_id = str()
+        s = 'type={}{} hash={} parent={} sibling_idx={}'.format(
+            int(type),
+            s_id,
+            int(hash),
+            str(self.val['parent']),
+            int(self.val['sibling_idx']),
+        )
+
+        if self.val['parent'] != 0:
+            field = TupleField(JsonTree.entry(self.val.address, TupleField.gdb_type, 'token'))
+            s += ' {}'.format(str(field))
+
+        return s
+
+    def children(self):
+        for i in range(0, int(self.val['max_child_idx']) + 1):
+            yield str(i), self.val['children'][i].dereference()
+
+    def display_hint(self):
+        return 'array'
+
 pp.add_printer('JsonToken', '^json_token$', JsonTokenPrinter)
 
+
+class MsgPackFrame:
+    '''Encapsulate struct mp_frame and the related functions.'''
+    def __init__(self, type, count):
+        self.type = type
+        self.count = count
+        self.idx = -1
+
+    def advance(self):
+        if self.idx >= self.count - 1:
+            return False
+        self.idx += 1
+        return True
+
+class MsgPackStack:
+    '''
+Encapsulate struct mp_stack and the related functions
+    '''
+    def __init__(self, size): # mp_stack_create
+        self.frames = []
+        self.size = size
+        self.used = 0
+
+    def is_empty(self): # mp_stack_is_empty
+        return len(self.frames) == 0
+
+    def is_full(self): # mp_stack_is_full
+        return len(self.frames) >= self.size
+
+    def push(self, type, count): # mp_stack_push
+        self.frames.append(MsgPackFrame(type, count))
+
+    def pop(self): # mp_stack_pop
+        assert not self.is_empty()
+        self.frames.pop()
+
+    def top(self): # mp_stack_top
+        assert not self.is_empty()
+        return self.frames[len(self.frames) - 1]
+
+def tuple_format_field_count(format):
+    root = format['fields']['root']
+    return root['max_child_idx'] + 1 if root['children'] else 0
+
+
+class TupleFormatIterator: # struct tuple_format_iterator
+    '''
+Replica of struct tuple_format_iterator
+    '''
+    def __init__(self, format, tuple): # tuple_format_iterator_create
+        self.parent = format['fields']['root']
+        self.format = format
+        self.pos = InputStream(tuple)
+        assert MsgPack.typeof(self.pos) == MsgPack.MP_ARRAY
+        self.multikey_frame = None
+
+        defined_field_count = MsgPack.decode_array(self.pos)
+
+        self.stack = MsgPackStack(format['fields_depth'])
+        defined_field_count = min(defined_field_count, tuple_format_field_count(format))
+        self.stack.push(MsgPack.MP_ARRAY, defined_field_count)
+
+    def __next__(self): # tuple_format_iterator_next
+        entry = {}
+        entry.data = self.pos
+        frame = self.stack.top()
+        while not frame.advance():
+            self.stack.pop()
+            if self.stack.is_empty():
+                raise StopIteration
+            frame = self.stack.top()
+            if self.parent.is_multikey():
+                self.multikey_frame = None
+            self.parent = self.parent['parent']
+
+        entry.parent = \
+            JsonTree.entry(self.parent, TupleField.gdb_type, 'token') \
+            if self.parent != self.format['fields']['root'] else None
+
+        token = {}
+        if frame.type == MsgPack.MP_ARRAY:
+            token.type = JsonToken.JSON_TOKEN_NUM
+            token.num = frame.idx
+        elif frame.type == MsgPack.MP_MAP:
+            if MsgPack.typeof(self.pos) != MsgPack.MP_STR:
+                entry.field = None
+                MsgPack.next(self.pos)
+                MsgPack.next(self.pos)
+                return entry
+            token.type = JsonToken.JSON_TOKEN_STR
+            token.str = MsgPack.decode_strl(self.pos, (uint32_t *)&token.len)
+        else:
+            raise gdb.GdbError('unexpected frame type ({})'.format(frame.type))
+
+        tree = JsonTree(self.format['fields'])
+        field = tree.lookup_entry(self.parent, token, \
+                        TupleField.gdb_type, 'token')
+        entry.field = field
+        # if self.multikey_frame is not None:
+        #     entry.multikey_count = self.multikey_frame['count']
+        #     entry.multikey_idx = self.multikey_frame['idx']
+        # else:
+        #     entry.multikey_count = 0
+        #     entry.multikey_idx = MULTIKEY_NONE
+
+        type = MsgPack.typeof(self.pos)
+        if (type == MsgPack.MP_ARRAY or type == MsgPack.MP_MAP) and \
+            not self.stack.is_full() and field != None:
+            size = MsgPack.decode_array(self.pos) if type == MsgPack.MP_ARRAY else \
+                   MsgPack.decode_map(self.pos)
+            entry.count = size
+            self.stack.push(type, size)
+            if field.token.is_multikey():
+                self.multikey_frame = self.stack.top()
+            self.parent = field.token
+        else:
+            entry.count = 0
+            MsgPack.next(self.pos)
+
+        return entry
+
+    def next(self): 
+        return self.__next__()
 
 class TuplePrinter:
     '''Print a tuple object.'''
 
     tuple_type = gdb.lookup_type('struct tuple')
+    support_compact = type_has_field(tuple_type, 'data_offset_bsize_raw')
 
     tuple_formats_sym = gdb.lookup_global_symbol('tuple_formats')
     if not tuple_formats_sym:
@@ -1271,6 +1679,7 @@ class TuplePrinter:
     tuple_formats = tuple_formats_sym.value()
 
     ptr_char = gdb.lookup_type('char').pointer()
+    ptr_int32 = gdb.lookup_type('int32_t').pointer()
     ptr_uint32 = gdb.lookup_type('uint32_t').pointer()
 
     # Printer configuration.
@@ -1278,17 +1687,25 @@ class TuplePrinter:
     mp_maxlen = -1
 
     def __init__(self, val):
-        if val.type != self.tuple_type:
+        log('TuplePrinter.__init__: val.type:        {}\n'.format(dump_type(val.type)))
+        log('TuplePrinter.__init__: self.tuple_type: {}\n'.format(dump_type(self.tuple_type)))
+        if not is_equal_types(val.type, self.tuple_type):
             raise gdb.GdbError('expression doesn\'t evaluate to tuple')
         self.val = val
 
     def is_compact(self): # tuple_is_compact
-        return self.val['data_offset_bsize_raw'] & 0x8000
+        return self.support_compact and self.val['data_offset_bsize_raw'] & 0x8000
 
     def format(self): # tuple_format
         return self.tuple_formats[self.val['format_id']].dereference()
 
     def data_offset(self): # tuple_data_offset
+        # prior to introducing of compact mode data offset was just stored
+        # in the corresponding field
+        if not self.support_compact:
+            return self.val['data_offset']
+        # after introducing support of compact mode offset is stored
+        # in a different way
         res = self.val['data_offset_bsize_raw']
         is_compact_bit = res >> 15
         res = (res & 0x7fff) >> (is_compact_bit * 8)
@@ -1297,25 +1714,61 @@ class TuplePrinter:
     def data(self): # tuple_data
         return self.val.address.cast(self.ptr_char) + self.data_offset()
 
-    def field(self, slot):
-        field_offs = (self.data().cast(self.ptr_uint32) + slot).dereference()
-        return '[{}]+{}:{}'.format(
-            slot,
-            field_offs,
-            str(TtMsgPack(self.data() + field_offs)),
-        )
+    def field_map_offset(self):
+        return self.val.type['bsize_bulky'].bitpos // 8 if self.is_compact() else self.val.type.sizeof
+
+    def field_iterator(self):
+        return TupleFormatIterator(self.format, self.data())
+
+    def fields2(self):
+        format = self.format()
+        TupleFormatIterator it()
+        for field in it:
+            pass
+
+    def field(self, field):
+        pass
+
+    def fields(self):
+        slots = self.data().cast(self.ptr_int32)
+        num_slots = (self.data_offset() - self.field_map_offset()) / self.ptr_uint32.target().sizeof - 3
+        islot = 1
+        while islot < num_slots:
+            field_offs = slots[-islot]
+            key = str()
+            if field_offs > 0:
+                key = '{}(+{})'.format(str(TtMsgPack(self.data() + field_offs)), field_offs)
+            elif field_offs < 0:
+                ext = (self.data() + field_offs).cast(self.ptr_int32)
+                num_ext_keys = ext.dereference()
+                ext_keys = ext + 1
+                key += '[{}-{}]:'.format(slots-ext, num_ext_keys)
+                for i in range(0, num_ext_keys):
+                    key += '{}(+{})'.format(str(TtMsgPack(self.data() + ext_keys[i])), ext_keys[i])
+            else:
+                key = 'missed'
+            yield islot, key
+            islot += 1
 
     def field_map(self):
-        field_map_offs = self.val.type['bsize_bulky'].bitpos // 8  if self.is_compact() else self.val.type.sizeof
-        num_slots = (self.data_offset() - field_map_offs) / self.ptr_uint32.target().sizeof
-        return ', '.join([ self.field(slot) for slot in range(-1, -(num_slots + 1), -1) ])
+        return ', '.join([ '[{}]:{}'.format(islot, key) for islot, key in self.fields() ])
+        #num_slots = (self.data_offset() - self.field_map_offset()) / self.ptr_uint32.target().sizeof - 3
+        #return ', '.join([ self.field(slot) for slot in range(-1, -(num_slots + 1), -1) ])
 
     def children(self):
-        yield 'local_refs', '{}'.format(int(self.val['local_refs']))
-        yield 'flags', '0x{:02x}'.format(int(self.val['flags']))
+        #log('TuplePrinter.children:\n')
+        for field in self.val.type.fields():
+            #log('TuplePrinter.children: field={}\n'.format(field))
+            if field.name == 'flags':
+                field_value = '0x{:02x}'.format(int(self.val['flags']))
+            else:
+                field_value = self.val[field.name]
+            yield field.name, field_value
         yield 'format', self.format()
-        yield 'data_offset', self.data_offset()
         yield 'field_map', self.field_map()
+        if self.support_compact:
+            yield 'is_compact', self.is_compact()
+        yield 'data_offset', self.data_offset()
         yield 'data', TtMsgPack(self.data()).to_string(self.mp_depth, self.mp_maxlen)
 
 pp.add_printer('Tuple', '^tuple$', TuplePrinter)
