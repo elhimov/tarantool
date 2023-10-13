@@ -16,6 +16,7 @@ typedef int32_t pid_t;
 pid_t getpid(void);
 void
 tarantool_exit(int);
+void abort();
 ]]
 
 local fio = require("fio")
@@ -202,6 +203,8 @@ table.insert(package.loaders, 5, gen_loader_func(search_rocks_lib, load_lib))
 rawset(package, "search", search)
 rawset(package, "searchroot", searchroot)
 rawset(package, "setsearchroot", setsearchroot)
+
+jit.attach(function(err) require("log").error(err); ffi.C.abort() end, "errfin")
 
 return {
     uptime = uptime;
