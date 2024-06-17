@@ -18,8 +18,9 @@ TARANTOOL_SERIES = series-${MAJOR_VERSION}
 S3_SOURCE_REPO_URL = s3://tarantool_repo/sources
 
 prepare:
-	rm -rf build packpack
-	git clone https://github.com/packpack/packpack.git
+	# rm -rf build packpack
+	# git clone https://github.com/packpack/packpack.git
+	rm -rf build
 
 package: prepare
 	if [ "${OS}" = "alpine" ]; then \

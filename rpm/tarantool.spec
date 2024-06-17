@@ -29,8 +29,12 @@ BuildRequires: cmake >= 3.3
 
 BuildRequires: make
 %if (0%{?fedora} >= 22 || 0%{?rhel} >= 7)
+%if "%{toolchain}" == "gcc"
 BuildRequires: gcc >= 4.5
 BuildRequires: gcc-c++ >= 4.5
+%elif "%{toolchain}" == "clang"
+BuildRequires: clang compiler-rt
+%endif
 %endif
 BuildRequires: coreutils
 BuildRequires: sed
@@ -139,6 +143,11 @@ stored procedures in Lua.
 This package provides server development files needed to create
 C and Lua/C modules.
 
+%if "%{toolchain}" == "clang"
+%undefine _hardened_build
+%undefine _annotated_build
+%endif
+
 %prep
 %setup -q -n %{name}-%{version}
 
@@ -159,7 +168,14 @@ C and Lua/C modules.
 %cmake \
 %endif
        -B . \
-         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+%if "%{toolchain}" == "clang"
+         -DCMAKE_C_COMPILER=/usr/bin/clang \
+         -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+%endif
+         -DCMAKE_BUILD_TYPE=Debug \
+         -DENABLE_ASAN:BOOL=ON \
+         -DLUAJIT_ENABLE_GC64=ON \
+         -DLUAJIT_USE_SYSMALLOC:BOOL=ON \
          -DCMAKE_INSTALL_LOCALSTATEDIR:PATH=%{_localstatedir} \
          -DCMAKE_INSTALL_SYSCONFDIR:PATH=%{_sysconfdir} \
 %if %{with systemd}
