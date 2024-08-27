@@ -169,7 +169,7 @@ C and Lua/C modules.
 %cmake \
 %endif
        -B . \
-         -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+         -DCMAKE_BUILD_TYPE=Debug \
          -DCMAKE_INSTALL_LOCALSTATEDIR:PATH=%{_localstatedir} \
          -DCMAKE_INSTALL_SYSCONFDIR:PATH=%{_sysconfdir} \
 %if %{with backtrace}

@@ -206,6 +206,7 @@ if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
 # Remove VALGRIND code and assertions in *any* type of release build.
     add_definitions("-DNDEBUG" "-DNVALGRIND")
 endif()
+add_definitions("-Wp,-U_FORTIFY_SOURCE")
 
 option(ENABLE_WERROR "Make all compiler warnings into errors" OFF)
 
