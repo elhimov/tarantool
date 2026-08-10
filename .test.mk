@@ -61,6 +61,10 @@ run-perf-test:
 	cmake --build ${BUILD_DIR} --parallel
 	cmake --build ${BUILD_DIR} --target test-perf
 
+.PHONY: run-gdb-test
+run-gdb-test: build
+	cd ${BUILD_DIR} && ctest --verbose -L gdb
+
 ##############################
 # Linux                      #
 ##############################
